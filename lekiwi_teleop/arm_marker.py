@@ -10,6 +10,12 @@ planar  shoulder_pan held at 0 and wrist_roll at planar_roll (-90 deg): the arm 
         vertical x/z plane in front of it. The marker moves in x and z; turning it about y sets
         the gripper's pitch. Sideways motion is left to the omnidirectional base.
 
+Velocity input (a joystick, lekiwi_teleop joy_teleop): ~/twist_cmd (TwistStamped, in frame_id;
+linear.x, linear.z and angular.y) drives the planar target, and switches to planar first. The
+target is the commanded fingertip pose moved ahead by the velocity times twist_lead, so it cannot
+run away from an arm that is blocked. ~/goal (PoseStamped) is the current target, or the
+fingertips when idle.
+
 Entering claw or planar first moves the arm into the mode with a planned, collision-checked
 motion (move_group). Then, each cycle while the marker is dragged (and after it is released,
 until the arm arrives or stops getting closer):
@@ -47,7 +53,7 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Duration as DurationMsg
 from controller_manager_msgs.srv import ListControllers
-from geometry_msgs.msg import Pose, PoseStamped, Quaternion
+from geometry_msgs.msg import Pose, PoseStamped, Quaternion, TwistStamped
 from interactive_markers import InteractiveMarkerServer, MenuHandler
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
@@ -55,7 +61,8 @@ from moveit_msgs.srv import GetPositionFK, GetPositionIK
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
-from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+from rclpy.executors import (ExternalShutdownException, MultiThreadedExecutor,
+                             SingleThreadedExecutor)
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from sensor_msgs.msg import JointState
@@ -199,6 +206,10 @@ class ArmMarker(Node):
         self.marker_scale = self.declare_parameter('marker_scale', 0.12).value
         trajectory_topic = self.declare_parameter(
             'trajectory_topic', '/arm_controller/joint_trajectory').value
+        # velocity input: ignored when older than twist_timeout; the target is the commanded
+        # pose moved ahead by velocity * twist_lead
+        self.twist_timeout = self.declare_parameter('twist_timeout', 0.25).value            # s
+        self.twist_lead = self.declare_parameter('twist_lead', 0.15).value                  # s
         # nothing moves until this controller is active (robot.launch.py starts everything at once)
         self.controller = self.declare_parameter('controller', 'arm_controller').value
         controller_manager = self.declare_parameter('controller_manager', '/controller_manager').value
@@ -206,7 +217,9 @@ class ArmMarker(Node):
         services = ReentrantCallbackGroup()
         # IK and FK are called from the control thread on a node of their own, spun only by that
         # thread, so a busy main executor cannot delay the responses
-        self.kinematics_node = rclpy.create_node('arm_marker_kinematics')
+        # use_global_arguments=False: the launch's __node:=arm_marker remap would rename it too
+        self.kinematics_node = rclpy.create_node('arm_marker_kinematics',
+                                                 use_global_arguments=False)
         self.kinematics_executor = SingleThreadedExecutor()
         self.kinematics_executor.add_node(self.kinematics_node)
         self.ik_client = self.kinematics_node.create_client(GetPositionIK, '/compute_ik')
@@ -220,6 +233,9 @@ class ArmMarker(Node):
         self.joint_positions = {}
         self.create_subscription(JointState, '/joint_states', self.on_joint_states, 10,
                                  callback_group=services)
+        self.create_subscription(TwistStamped, '~/twist_cmd', self.on_twist, 10,
+                                 callback_group=services)
+        self.goal_pub = self.create_publisher(PoseStamped, '~/goal', 10)
 
         # The default feedback queue holds one message, so a MOUSE_DOWN followed quickly by a
         # POSE_UPDATE loses the MOUSE_DOWN.
@@ -249,11 +265,25 @@ class ArmMarker(Node):
         self.last_feedback = None
         self.last_snap = None
         self.snap_requested = False # put the marker back on the gripper (control thread)
+        self.twist = None           # latest ~/twist_cmd, and its time.monotonic()
+        self.twist_time = None
+        self.joystick_active = False
 
         self.loop = threading.Thread(target=self.run_loop, daemon=True)
         self.get_logger().info('waiting for move_group and the joint states')
 
     # --- ROS helpers -------------------------------------------------------------------------
+
+    def on_twist(self, msg):
+        with self.lock:
+            self.twist = msg
+            self.twist_time = time.monotonic()
+
+    def publish_goal(self, pose):
+        msg = PoseStamped(pose=pose)
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.goal_pub.publish(msg)
 
     def on_joint_states(self, msg):
         for name, position in zip(msg.name, msg.position):
@@ -693,6 +723,37 @@ class ArmMarker(Node):
                 self.start_transition(requested)
             return
 
+        # velocity input: drives the planar target while it is fresh and non-zero
+        with self.lock:
+            twist, twist_time = self.twist, self.twist_time
+        twist_fresh = (twist is not None and time.monotonic() - twist_time < self.twist_timeout
+                       and any(abs(v) > 1e-6 for v in (twist.twist.linear.x, twist.twist.linear.z,
+                                                       twist.twist.angular.y)))
+        if twist_fresh and self.mode != 'planar':
+            with self.lock:
+                if self.requested_mode != 'planar':
+                    self.requested_mode = 'planar'
+                    if self.tracking:
+                        self.stop_tracking('velocity input: switching to planar')
+                    self.get_logger().info('velocity input: switching to planar mode')
+            return
+        with self.lock:
+            if twist_fresh:
+                if not self.tracking:
+                    self.tracking = True
+                    self.q_cmd = None
+                    self.plan = []
+                    self.get_logger().info('following the velocity input (planar)')
+                self.dragging = True
+                self.last_feedback = self.get_clock().now()
+                self.joystick_active = True
+                if self.target is None:
+                    self.target = self.marker_pose_for(tip)   # replaced once the anchor is known
+            elif self.joystick_active:
+                self.joystick_active = False
+                self.dragging = False
+                self.released(self.get_clock().now())
+
         with self.lock:
             if (self.dragging and self.last_feedback is not None and self.get_clock().now()
                     - self.last_feedback > Duration(seconds=self.drag_timeout)):
@@ -706,6 +767,7 @@ class ArmMarker(Node):
                     or quaternion_angle(pose.orientation, self.last_snap.orientation) > 0.01):
                 self.snap_requested = False
                 self.snap_to_gripper(tip)
+            self.publish_goal(tip)
             return
         if marker is None:
             return
@@ -727,6 +789,21 @@ class ArmMarker(Node):
             upcoming = [p for p in self.plan if p[0] > clock + 0.005]
             anchor_time, self.q_cmd, self.ee_cmd = upcoming[0] if upcoming else self.plan[-1]
             anchor_time = max(anchor_time, clock)
+
+        if self.joystick_active and twist is not None:
+            # the commanded pose, moved ahead by the velocity
+            v = twist.twist
+            m = quat_to_mat(self.ee_cmd.orientation) @ self.r_planar.T
+            pitch = math.atan2(m[0, 2], m[0, 0]) + v.angular.y * self.twist_lead
+            marker = make_pose((self.ee_cmd.position.x + v.linear.x * self.twist_lead, self.plane_y,
+                                self.ee_cmd.position.z + v.linear.z * self.twist_lead),
+                               mat_to_quat(rot_y(pitch)))
+            with self.lock:
+                self.target = marker
+            target = self.mode_target(marker)
+            self.server.setPose(MARKER_NAME, marker)
+            self.server.applyChanges()
+        self.publish_goal(target)
 
         p_err = position_distance(self.ee_cmd, target)
         a_err = quaternion_angle(self.ee_cmd.orientation, target.orientation)
@@ -784,7 +861,7 @@ def main():
     node.loop.start()
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         executor.shutdown()

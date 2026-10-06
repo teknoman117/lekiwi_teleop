@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_marker = lekiwi_teleop.arm_marker:main',
+            'joy_teleop = lekiwi_teleop.joy_teleop:main',
         ],
     },
 )

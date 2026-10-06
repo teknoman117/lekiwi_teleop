@@ -87,8 +87,49 @@ while a planned motion executes.
 `ik_timeout` (0.02 s), `horizon` (6 steps), `position_tolerance` (0.003 m), `orientation_tolerance`
 (0.05 rad), `settle_timeout`, `drag_timeout` (1.0 s: a drag with no feedback for this long counts
 as released), `claw_search_step` (0.02 m), `claw_ready` (`[0.20, 0.0, 0.04]`),
-`transition_scaling` (0.3), `marker_scale`, `trajectory_topic`, `controller` (`arm_controller`:
+`transition_scaling` (0.3), `twist_timeout` (0.25 s), `twist_lead` (0.15 s), `marker_scale`,
+`trajectory_topic`, `controller` (`arm_controller`:
 nothing moves until it is active) and `controller_manager`.
 
 With `--log-level arm_marker:=debug`, every cycle without a feasible step logs why (the IK error
 codes, or the joint jump that was rejected).
+
+## joy_teleop
+
+A joystick for the base and the arm together. Run it where the joystick is plugged in, on the
+same `ROS_DOMAIN_ID` as the robot (which runs `robot.launch.py`, with `arm_marker`):
+
+```bash
+ros2 launch lekiwi_teleop joy_teleop.launch.py        # joy_node + joy_teleop
+```
+
+| Input | Does |
+|---|---|
+| axis 1 / axis 0 | base forward/back, left/right (`scale_linear_x` / `scale_linear_y`, -0.25 m/s) |
+| axis 3 | base turn (`scale_angular_yaw`, -1.0 rad/s) |
+| axis 7 | arm goal up (+1) / down (-1) (`arm_linear_speed`, 0.04 m/s) |
+| axis 6 | arm goal forward (-1) / back (+1) |
+| button 0 / button 2 | gripper tip turns toward / away from the robot (`arm_pitch_speed`, 0.5 rad/s) |
+| button 4 / button 5 | base moves left / right around the arm's goal, facing it (`orbit_speed`, 0.1 m/s) |
+| button 6 / button 7 | gripper open (`gripper_open`, 1.2 rad) / close (`gripper_close`, -0.1 rad), once per press |
+
+The base mapping is the `teleop_twist_joy` setup it replaces (no enable button); commands go to
+`/omni_wheel_drive_controller/cmd_vel` (TwistStamped), one zero command when the sticks are
+released, then nothing. The arm directions are the robot's, not the gripper's.
+
+The arm is driven through `arm_marker`'s velocity input (`/arm_marker/twist_cmd`), so it gets
+the same IK, collision checking, clamping and smooth streaming as the marker. Joystick input
+switches `arm_marker` to planar mode (`shoulder_pan` 0, `wrist_roll` -90 deg) first, with a
+planned move. The RViz marker shows the joystick's goal.
+
+**Orbit.** To circle the goal point p = (px, py) (from `/arm_marker/goal`, in `base_footprint`)
+while facing it, the base turns at w and moves its centre at v = w x (-p) = (w py, -w px), the
+velocity of a rigid body turning about p. joy_teleop sends linear (w py, -w px) and angular w,
+with w = `orbit_speed` / |p| (w < 0 to go left with the goal ahead). The orbit adds to the
+sticks. Checked in mock: integrating 2 s of the commands (0.19 m sideways, 26 deg), the goal
+moved 1.1 mm.
+
+All axis and button numbers are parameters (`axis_linear_x`, `axis_linear_y`,
+`axis_angular_yaw`, `axis_arm_x`, `axis_arm_z`, `button_pitch_away`, `button_pitch_toward`,
+`button_orbit_left`, `button_orbit_right`, `button_gripper_open`, `button_gripper_close`), as are the speeds, `min_orbit_radius` (0.1 m),
+`rate` (20 Hz) and `joy_timeout` (0.5 s: no commands from older joystick messages).

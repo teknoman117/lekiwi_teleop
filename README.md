@@ -63,7 +63,10 @@ were measured), and with one point per cycle the arm stopped and started. If the
 arm comes to rest at the end of the last plan. `arm_controller` has
 `interpolate_from_desired_state: true` (`so101_description/config/so101_controllers.yaml`), so
 each trajectory continues from the last commanded state, not the measured one, which lags on
-real servos.
+real servos. For the same reason, each drag or joystick input starts from where the controller
+holds the arm (the `reference` in `/arm_controller/controller_state`), and while idle the marker
+and `~/goal` show that pose: the servos sag a little under load, and starting from the measured
+pose lowered the target with every new input.
 
 The loop runs on its own thread at a fixed rate, and calls IK and FK on a node of its own: as an
 executor timer, rclpy started it late while busy with other callbacks.

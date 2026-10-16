@@ -41,6 +41,11 @@ longer stops the arm, and if the node stops, the arm comes to rest at the end of
 IK is collision-aware (avoid_collisions). Nothing is published while idle, so planned motions
 from move_group are never overridden; the marker follows the gripper while idle.
 
+"The gripper" here is where arm_controller holds it (its reference, ~/controller_state), not where
+the joint states measure it: under load the servos sag a little below their commands, and
+starting each drag or joystick input from the measured pose would lower the target every time.
+The measured joints are used only until the controller's state arrives.
+
 The control loop runs on its own thread, at a fixed rate, not as an executor timer: rclpy's
 executor starts timers late while it is busy with other callbacks.
 """
@@ -52,6 +57,7 @@ import time
 import numpy as np
 import rclpy
 from builtin_interfaces.msg import Duration as DurationMsg
+from control_msgs.msg import JointTrajectoryControllerState
 from controller_manager_msgs.srv import ListControllers
 from geometry_msgs.msg import Pose, PoseStamped, Quaternion, TwistStamped
 from interactive_markers import InteractiveMarkerServer, MenuHandler
@@ -213,6 +219,10 @@ class ArmMarker(Node):
         # nothing moves until this controller is active (robot.launch.py starts everything at once)
         self.controller = self.declare_parameter('controller', 'arm_controller').value
         controller_manager = self.declare_parameter('controller_manager', '/controller_manager').value
+        # the controller's reference: where it holds the arm (default: /<controller>/controller_state)
+        controller_state_topic = self.declare_parameter(
+            'controller_state_topic', f'/{self.controller}/controller_state').value
+        self.reference_timeout = self.declare_parameter('reference_timeout', 0.5).value    # s
 
         services = ReentrantCallbackGroup()
         # IK and FK are called from the control thread on a node of their own, spun only by that
@@ -233,6 +243,9 @@ class ArmMarker(Node):
         self.joint_positions = {}
         self.create_subscription(JointState, '/joint_states', self.on_joint_states, 10,
                                  callback_group=services)
+        self.reference = None       # (arm joint positions, time.monotonic()) from the controller
+        self.create_subscription(JointTrajectoryControllerState, controller_state_topic,
+                                 self.on_controller_state, 10, callback_group=services)
         self.create_subscription(TwistStamped, '~/twist_cmd', self.on_twist, 10,
                                  callback_group=services)
         self.goal_pub = self.create_publisher(PoseStamped, '~/goal', 10)
@@ -289,14 +302,28 @@ class ArmMarker(Node):
         for name, position in zip(msg.name, msg.position):
             self.joint_positions[name] = position
 
+    def on_controller_state(self, msg):
+        try:
+            q = [msg.reference.positions[msg.joint_names.index(j)] for j in ARM_JOINTS]
+        except (ValueError, IndexError):
+            return
+        self.reference = (q, time.monotonic())
+
     def measured_q(self):
         if not all(j in self.joint_positions for j in ARM_JOINTS):
             return None
         return [self.joint_positions[j] for j in ARM_JOINTS]
 
+    def held_q(self):
+        """Where arm_controller holds the arm (its reference), else the measured joints."""
+        reference = self.reference
+        if reference is not None and time.monotonic() - reference[1] < self.reference_timeout:
+            return list(reference[0])
+        return self.measured_q()
+
     def tip_pose(self):
-        """The measured fingertip pose (forward kinematics of /joint_states)."""
-        q = self.measured_q()
+        """The fingertip pose where the controller holds it (forward kinematics of held_q)."""
+        q = self.held_q()
         if q is None or not self.fk_client.service_is_ready():
             return None
         return self.forward_kinematics(q)
@@ -524,7 +551,7 @@ class ArmMarker(Node):
                 self.last_feedback = now
                 if not self.tracking:
                     self.tracking = True
-                    self.q_cmd = None   # start from the measured joints
+                    self.q_cmd = None   # start from where the controller holds the arm
                     self.plan = []
                     self.get_logger().info(f'following the marker ({self.mode})')
             elif fb.event_type == InteractiveMarkerFeedback.MOUSE_UP:
@@ -774,7 +801,7 @@ class ArmMarker(Node):
         target = self.mode_target(marker)
 
         if self.q_cmd is None:
-            self.q_cmd = self.measured_q()
+            self.q_cmd = self.held_q()
             if self.q_cmd is None:
                 return
             self.ee_cmd = self.forward_kinematics(self.q_cmd)

@@ -58,7 +58,7 @@ class JoyTeleop(Node):
         self.button_gripper_open = p('button_gripper_open', 6).value
         self.button_gripper_close = p('button_gripper_close', 7).value
         self.gripper_open = p('gripper_open', 1.2).value                   # rad
-        self.gripper_close = p('gripper_close', -0.1).value                # rad (lower limit -0.1745)
+        self.gripper_close = p('gripper_close', -0.1745).value             # rad (lower limit -0.174533)
         gripper_action = p('gripper_action', '/gripper_controller/gripper_cmd').value
         # orbit around the arm's goal
         self.button_orbit_left = p('button_orbit_left', 4).value

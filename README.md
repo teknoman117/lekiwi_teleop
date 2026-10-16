@@ -111,7 +111,7 @@ ros2 launch lekiwi_teleop joy_teleop.launch.py        # joy_node + joy_teleop
 | axis 6 | arm goal forward (-1) / back (+1) |
 | button 0 / button 2 | gripper tip turns toward / away from the robot (`arm_pitch_speed`, 0.5 rad/s) |
 | button 4 / button 5 | base moves left / right around the arm's goal, facing it (`orbit_speed`, 0.1 m/s) |
-| button 6 / button 7 | gripper open (`gripper_open`, 1.2 rad) / close (`gripper_close`, -0.1 rad), once per press |
+| button 6 / button 7 | gripper open (`gripper_open`, 1.2 rad) / close (`gripper_close`, -0.1745 rad), once per press |
 
 The base mapping is the `teleop_twist_joy` setup it replaces (no enable button); commands go to
 `/omni_wheel_drive_controller/cmd_vel` (TwistStamped), one zero command when the sticks are

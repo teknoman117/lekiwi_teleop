@@ -44,9 +44,9 @@ class JoyTeleop(Node):
         self.axis_linear_x = p('axis_linear_x', 1).value
         self.axis_linear_y = p('axis_linear_y', 0).value
         self.axis_angular_yaw = p('axis_angular_yaw', 3).value
-        self.scale_linear_x = p('scale_linear_x', -0.25).value
-        self.scale_linear_y = p('scale_linear_y', -0.25).value
-        self.scale_angular_yaw = p('scale_angular_yaw', -1.0).value
+        self.scale_linear_x = p('scale_linear_x', 0.25).value
+        self.scale_linear_y = p('scale_linear_y', 0.25).value
+        self.scale_angular_yaw = p('scale_angular_yaw', 1.0).value
         # arm
         self.axis_arm_x = p('axis_arm_x', 6).value
         self.axis_arm_z = p('axis_arm_z', 7).value

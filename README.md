@@ -108,8 +108,8 @@ ros2 launch lekiwi_teleop joy_teleop.launch.py        # joy_node + joy_teleop
 
 | Input | Does |
 |---|---|
-| axis 1 / axis 0 | base forward/back, left/right (`scale_linear_x` / `scale_linear_y`, -0.25 m/s) |
-| axis 3 | base turn (`scale_angular_yaw`, -1.0 rad/s) |
+| axis 1 / axis 0 | base forward/back, left/right (`scale_linear_x` / `scale_linear_y`, 0.25 m/s) |
+| axis 3 | base turn (`scale_angular_yaw`, 1.0 rad/s) |
 | axis 7 | arm goal up (+1) / down (-1) (`arm_linear_speed`, 0.04 m/s) |
 | axis 6 | arm goal forward (-1) / back (+1) |
 | button 0 / button 2 | gripper tip turns toward / away from the robot (`arm_pitch_speed`, 0.5 rad/s) |
